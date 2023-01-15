@@ -1,0 +1,291 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+---
+# Loading in the Data & Some Cleaning 
+```{r,message=F}
+library(readr)
+library(class)
+library(tidyverse)
+library(e1071)
+library(tree)
+library(randomForest)
+library(rvest)
+library(ggtext)
+
+set.seed(1)
+cbb = read_csv("cbb.csv")
+cbb = cbb %>% arrange(TEAM) %>% arrange(CONF) %>% arrange(YEAR) %>% mutate(WPCT = W/G)
+cbb$POSTSEASON[is.na(cbb$POSTSEASON)] = "N/A"
+cbb$POSTSEASON = factor(cbb$POSTSEASON,level=c("N/A","R68","R64","R32","S16","E8","F4","2ND","Champions")) #order the exit outcomes
+cbb = cbb %>% rename(TWOP_O = `2P_O`, THREEP_O = `3P_O`, TWOP_D = `2P_D`, 
+                     THREEP_D = `3P_D`) #tree package does not like column names w/ numbers
+cbb = cbb[-21] #remove wins above bubble column - we will not have this for predictions in practice
+```
+## Training & Testing Data
+```{r}
+train_nos = sample(1:nrow(cbb),1500)
+cbb.train = cbb[train_nos,]
+cbb.test = cbb[-train_nos,]
+```
+## Exploratory Data Analysis
+```{r}
+#plot correlations
+correlations = data.frame(sapply(cbb[c(5:20)],cor,cbb[c(5:20)]))
+correlations$other = colnames(correlations)
+correlations = correlations %>% pivot_longer(1:16)
+ggplot(correlations)+
+  geom_tile(aes(x=name,y=other,fill=value))+
+  scale_fill_gradient2(low="#264653",mid="#e76f51",high="#e9c46a")+
+  theme(axis.text.x = element_text(angle=90))
+```
+
+
+## Predicting Team Playoff Exits
+
+
+### K-Nearest Neighbors
+```{r}
+# find optimal k using leave-one-out cross validation
+accuracies = c()
+for(i in 1:20){ 
+  temp.knn = knn.cv(cbb.train[5:20],cbb.train$POSTSEASON,k=i)
+  temp.knn.acc = mean(temp.knn==cbb.train$POSTSEASON)
+  accuracies = append(accuracies,temp.knn.acc)
+}
+optimal.k = which.max(accuracies)
+#fit knn model
+knn.p = knn(cbb.train[5:20],cbb.test[5:20],cbb.train$POSTSEASON,k=optimal.k) #predict on test data
+knn.tab = as.data.frame(table(Predicted = knn.p,Actual = cbb.test$POSTSEASON)) #confusion matrix
+knn.tab$Correct = knn.tab$Predicted == knn.tab$Actual
+knn.tab$Correct[knn.tab$Freq==0] = "N/A"
+knn.acc = sum(knn.tab$Freq[knn.tab$Correct=="TRUE"])/sum(knn.tab$Freq)
+#plot knn model
+ggplot(knn.tab)+
+  geom_tile(aes(Predicted, Actual, fill=factor(Correct)))+
+  geom_text(aes(Predicted,Actual,label = Freq))+
+  scale_fill_manual(values=c("#e76f51","#264653","#e9c46a"),name="Correct?")+
+  xlab("Predicted")+
+  ylab("Actual")+
+  labs(title=paste0("Playoff Exits Predicted by K-Nearest Neighbors (Optimal K=",optimal.k,")"),caption=paste("N/A means that a team did not make the playoffs | Accuracy =",round(knn.acc,3)))
+```
+
+### Naive Bayes
+```{r}
+nb = naiveBayes(cbb.train[5:20],cbb.train[21]) #fit nb model
+nb.p = predict(nb,cbb.test[5:20])
+nb.tab = as.data.frame(table(Predicted = nb.p,Actual = cbb.test$POSTSEASON))
+nb.tab$Correct = nb.tab$Predicted == nb.tab$Actual
+nb.tab$Correct[nb.tab$Freq==0] = "N/A"
+nb.acc = sum(nb.tab$Freq[nb.tab$Correct=="TRUE"])/sum(nb.tab$Freq)
+
+ggplot(nb.tab)+
+  geom_tile(aes(Predicted, Actual, fill=factor(Correct)))+
+  geom_text(aes(Predicted,Actual,label = Freq))+
+  scale_fill_manual(values=c("#e76f51","#264653","#e9c46a"),name="Correct?")+
+  xlab("Predicted")+
+  ylab("Actual")+
+  labs(title="Playoff Exits Predicted by Naive Bayes",caption=paste("N/A means that a team was predicted to miss the playoffs | Accuracy =",round(nb.acc,3)))
+```
+
+### Classification Tree
+```{r}
+cb.tree = tree(`POSTSEASON` ~ .,data=cbb.train[5:21]) #fit regression tree
+plot(cb.tree)
+text(cb.tree)
+tree.p = predict(cb.tree,cbb.test,type="class")
+tree.tab = as.data.frame(table(Predicted = tree.p,Actual = cbb.test$POSTSEASON))
+tree.tab$Correct = tree.tab$Predicted == tree.tab$Actual
+tree.tab$Correct[tree.tab$Freq==0] = "N/A"
+tree.acc = sum(tree.tab$Freq[tree.tab$Correct=="TRUE"])/sum(tree.tab$Freq)
+
+ggplot(tree.tab)+
+  geom_tile(aes(Predicted, Actual, fill=factor(Correct)))+
+  geom_text(aes(Predicted,Actual,label = Freq))+
+  scale_fill_manual(values=c("#e76f51","#264653","#e9c46a"),name="Correct?")+
+  xlab("Predicted")+
+  ylab("Actual")+
+  labs(title="Playoff Exits Predicted by Classification Tree",caption=paste("N/A means that a team was predicted to miss the playoffs | Accuracy =",round(tree.acc,3)))
+```
+
+### Random Forest
+```{r}
+cbb.rf = randomForest(`POSTSEASON` ~ .,data=cbb.train[5:21])
+rf.p = predict(cbb.rf,cbb.test,type="class")
+rf.tab = as.data.frame(table(Predicted = rf.p,Actual = cbb.test$POSTSEASON))
+rf.tab$Correct = rf.tab$Predicted == rf.tab$Actual
+rf.tab$Correct[rf.tab$Freq==0] = "N/A"
+rf.acc = sum(rf.tab$Freq[rf.tab$Correct=="TRUE"])/sum(rf.tab$Freq)
+
+ggplot(rf.tab)+
+  geom_tile(aes(Predicted, Actual, fill=factor(Correct)))+
+  geom_text(aes(Predicted,Actual,label = Freq))+
+  scale_fill_manual(values=c("#e76f51","#264653","#e9c46a"),name="Correct?")+
+  xlab("Predicted")+
+  ylab("Actual")+
+  labs(title="Playoff Exits Predicted by Random Forest Model",caption=paste("N/A means that a team was predicted to have missed the playoffs | Accuracy =",round(rf.acc,3)))+
+  theme(panel.background = element_blank(),
+        plot.background = element_blank())
+
+varImpPlot(cbb.rf) #which variables are most important for the random forest?
+```
+
+## Predicting Whether Teams Survived to a Certain Tournament Round
+
+```{r}
+classes.df = data.frame(POSTSEASON = factor(levels(cbb$POSTSEASON),levels=levels(cbb$POSTSEASON)),Num = 1:9)
+cbb = left_join(cbb,classes.df)
+cbb.train = cbb[train_nos,]
+cbb.test = cbb[-train_nos,]
+metrics = data.frame(Accuracy = 0,Precision = 0, Recall = 0, Round = 'test',Method = "o")
+for(i in 2:9){
+   cbb.train[[paste0("round",i)]] = cbb.train$Num>=i #did the team make it at least to round number i?
+   cbb.test[[paste0("round",i)]] = cbb.test$Num>=i
+#logistic regression
+   temp.logit = glm(as.formula(paste0(   #fit the logistic regression model
+     colnames(cbb.train)[ncol(cbb.train)],"~",
+     paste0(colnames(cbb.train[5:20]),
+            collapse="+"))),data=cbb.train[c(5:20,ncol(cbb.train))])
+   temp.logit.p = predict(temp.logit,cbb.test[5:20])
+   temp.logit.p = ifelse(temp.logit.p>.5,TRUE,FALSE)
+   temp.logit.tab = table(Predicted = factor(temp.logit.p,levels=c("TRUE","FALSE")),
+                          Actual = factor(unlist(cbb.test[ncol(cbb.test)]),levels=c("TRUE","FALSE")))
+   temp.logit.acc = mean(temp.logit.p == cbb.test[ncol(cbb.test)])
+   temp.logit.precision = temp.logit.tab[1]/sum(temp.logit.tab[c(1,3)])
+   temp.logit.recall = temp.logit.tab[1]/sum(temp.logit.tab[c(1,2)])
+   metrics = rbind(metrics,
+                    c(round(temp.logit.acc,3),
+                      round(temp.logit.precision,3),
+                      round(temp.logit.recall,3),
+                      classes.df$POSTSEASON[i],
+                      "Logistic Regression"))
+#KNN
+   temp.knn = knn(cbb.train[5:20],cbb.test[5:20],cbb.train[[paste0("round",i)]],k=optimal.k) 
+   temp.knn.tab = table(Predicted = factor(temp.knn,levels=c("TRUE","FALSE")),
+                          Actual = factor(unlist(cbb.test[ncol(cbb.test)]),levels=c("TRUE","FALSE")))
+   temp.knn.acc = mean(temp.knn == unlist(cbb.test[ncol(cbb.test)]))
+   temp.knn.precision = temp.knn.tab[1]/sum(temp.knn.tab[c(1,3)])
+   temp.knn.recall = temp.knn.tab[1]/sum(temp.knn.tab[c(1,2)])
+   metrics = rbind(metrics,
+                    c(round(temp.knn.acc,3),
+                      round(temp.knn.precision,3),
+                      round(temp.knn.recall,3),
+                      classes.df$POSTSEASON[i],
+                      paste0("K-Nearest Neighbors (Optimal K=",optimal.k,")")))
+#Random Forest
+   cbb.train[[paste0("round",i)]] =factor(cbb.train$Num>=i,levels=c("TRUE","FALSE"))
+   cbb.test[[paste0("round",i)]] = factor(cbb.test$Num>=i,levels=c("TRUE","FALSE"))
+   temp.rf = randomForest( #fit the random forest model
+     as.formula(
+       paste0(colnames(cbb.train)[ncol(cbb.train)],"~", 
+              paste0(colnames(cbb.train[5:20]), collapse="+"))
+       ),data=cbb.train[c(5:20,ncol(cbb.train))])
+   temp.rf.p = predict(temp.rf,cbb.test[5:20],type="class")
+   temp.rf.tab = table(Predicted = factor(temp.rf.p,levels=c("TRUE","FALSE")),
+                          Actual = unlist(cbb.test[ncol(cbb.test)]))
+   temp.rf.acc = mean(temp.rf.p == unlist(cbb.test[ncol(cbb.test)]))
+   temp.rf.precision = temp.rf.tab[1]/sum(temp.rf.tab[c(1,3)])
+   temp.rf.recall = temp.rf.tab[1]/sum(temp.rf.tab[c(1,2)])
+   metrics = rbind(metrics,
+                    c(round(temp.rf.acc,3),
+                      round(temp.rf.precision,3),
+                      round(temp.rf.recall,3),
+                      classes.df$POSTSEASON[i],
+                      "Random Forest"))
+}
+#visualizing evaluation metrics
+metrics = metrics[-1,] #remove placeholder row
+metrics = metrics %>% pivot_longer(cols=c("Accuracy","Precision","Recall"))
+metrics = metrics %>% mutate(`N/A?` = factor(metrics$value=="NaN")) %>% na.omit()
+metrics$Round = factor(metrics$Round) #order plot by playoff round
+metrics$value = as.numeric(metrics$value) #variable was factor from N/A inclusion
+metrics$value[which(metrics$value=="NaN")] = 1
+levels(metrics$Round) = classes.df$POSTSEASON[2:9]
+
+ggplot(metrics)+
+  geom_bar(aes(Round,value,fill=`N/A?`),stat = "identity")+
+  scale_fill_manual(values=c("#e76f51","#e9c46a"))+
+  facet_wrap(~Method+name)+
+  ylab("none")+
+  labs(title="Model Evaluation Metrics by Method & Playoff Round (Yellow = N/A)",caption = "For each modeling method and playoff round, a model was created to predict whether teams made it to each given round.")+
+  theme(strip.background = element_rect(fill="#264653",color="white"), 
+        strip.text = element_text(color="white"), axis.text.x = element_text(angle=45),
+        legend.position = "none", axis.title.x = element_blank(), axis.title.y = element_blank(),
+        plot.background = element_blank())
+```
+
+## Re-Predicting the 2019 NCAA Tournament
+
+### Scraping & Cleaning Bracket Data
+```{r}
+raw = read_html("https://www.ncaa.com/news/basketball-men/article/2020-05-06/2019-ncaa-tournament-bracket-scores-stats-records")
+text = raw %>% html_node(xpath="/html/body/div[1]/div/main/div/div/div/article/div/div[4]/ul") %>% html_text()
+text = unlist(text %>% str_split("[:digit:]"))
+text = text[text!=""]
+text = text[-grep("\\\n",text[])]
+text = text[-grep("No\\.",text[])]
+text = substr(text,2,str_length(text)-1)
+text[54] = "Cincinnati" #NCAA website incorrectly had Temple
+text[which(text=="N.C. Central")] = "North Carolina Central" #most of the cleaning can by done by sorting them in alphabetical order, but a couple of these mess that up
+text[which(text=="Ole Miss")] = "Mississippi"
+tourn = cbb %>% filter(YEAR==2019) %>% filter(POSTSEASON!="N/A") #2019 tournament teams
+tourn = tourn[c(1,5:20)] 
+names = data.frame(text = sort(unique(text)),TEAM = sort(tourn$TEAM))
+text = data.frame(text = text) %>% left_join(names,by="text") %>% select(2)
+```
+### Random Forest Model Fitting & Prediction
+```{r}
+cbb.rf = randomForest(`POSTSEASON` ~ .,data=cbb.train[5:21] %>% filter("YEAR" != 2019)) #re-fit a random forest model without the 2019 data
+tournament.df = left_join(text,tourn,by="TEAM")
+tournament.df$Predicted = predict(cbb.rf,tournament.df[2:17])
+tournament.df = left_join(tournament.df, classes.df %>% rename(Predicted = POSTSEASON),by="Predicted")
+
+rounds = c("R68","R64","R32","S16","E8","F4","Championship")
+indices = list(1:4,5:36,37:52,53:60,61:64,65:66,67) #indicates which rows of the tournament data frame that correspond to each round
+yvalues = list(15:18,1:32,9:24,13:20,15:18,16:17,16) #serve no purpose other than visualization
+for(i in 1:length(rounds)){ #create data frame of predictions for each round of the tournament
+  assign(rounds[i], data.frame(T1=tournament.df$TEAM[seq(1,133,2)], T2=tournament.df$TEAM[seq(2,134,2)],
+                    Pred1=tournament.df$Num[seq(1,133,2)], Pred2 = tournament.df$Num[seq(2,134,2)],
+                    T1.Original=tournament.df$TEAM[seq(1,133,2)],T2.Original =
+                    tournament.df$TEAM[seq(2,134,2)])[indices[[i]],])
+  temp.df = get(rounds[i])
+  if(i != 1 && nrow(false.predictions>0)){
+    for(j in 1:nrow(false.predictions)){
+     temp.df[temp.df == false.predictions[j,1]][1] = false.predictions[j,2] #replace original teams with teams falsely predicted to win
+    }
+  }
+  temp.df = temp.df %>% mutate(PredWinner = ifelse(temp.df$Pred1>temp.df$Pred2,temp.df$T1,temp.df$T2))
+  temp.df = temp.df %>% mutate(PredLoser = ifelse(temp.df$Pred1>temp.df$Pred2,temp.df$T2,temp.df$T1))
+  temp.df = temp.df %>% mutate(Correct.Winner = temp.df$T1==temp.df$PredWinner)
+  temp.df = temp.df %>% mutate(Correct.Teams = temp.df$T1==temp.df$T1.Original & temp.df$T2==temp.df$T2.Original)
+  temp.df = temp.df %>% mutate(Correct.Total = temp.df$Correct.Winner+temp.df$Correct.Teams)
+  temp.df = temp.df %>% mutate(Round = rounds[i])
+  temp.df = temp.df %>% mutate(yvals = yvalues[[i]])
+  assign(rounds[i],temp.df)
+  false.predictions = temp.df[temp.df$Correct.Winner==F,]
+}
+total = rbind(R68,R64,R32,S16,E8,F4,Championship) #combine all of the prediction data frames for each round
+
+total$Round = factor(total$Round,levels=rounds)
+total$Correct.Total = ifelse(total$Correct.Winner==F,0,total$Correct.Total) 
+total$Correct.Total = factor(total$Correct.Total,levels=c("0","1","2"))
+levels(total$Correct.Total) = c("Incorrect","Correct winner, incorrect loser","Correct")
+
+ggplot(total)+
+  geom_tile(aes(x=Round,y=yvals,fill=Correct.Total))+
+  scale_fill_manual(values=c("#264653","#e9c46a","#e76f51"),name="Prediction Accuracy")+
+   geom_richtext(aes(x=Round,y=yvals,label=substr(paste0(PredWinner," vs. <span style='color:black'>",PredLoser),1,52)),size=2,fill=NA,color=c("white"),label.color=NA)+
+  labs(title="Random Forest Model Prediction of the 2019 NCAA MBB Tournament",caption="Black names are teams that were predicted to have been eliminated")+
+  theme_void()+
+  theme(axis.text.x = element_text(),legend.position = c(.8,.8))
+
+ggplot(total)+
+  geom_tile(aes(x=Round,y=yvals,fill=Correct.Total))+
+  scale_fill_manual(values=c("#264653","#264653","#264653"),name="Prediction Accuracy")+
+  geom_richtext(aes(x=Round,y=yvals,label=substr(paste0(T1.Original," vs. <span style='color:red'>",T2.Original),1,52)),size=2,fill=NA,color=c("white"),label.color=NA)+
+  labs(title="Original 2019 NCAA MBB Tournament Results for Comparison (Red Name = Eliminated)")+
+  theme_void()+
+  theme(axis.text.x = element_text(),legend.position = "none")
+```
+
